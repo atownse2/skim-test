@@ -1,7 +1,7 @@
 {
     "manager-name": "triphoton-manager",
-    "max-workers": 50,
-    "min-workers": 50,
+    "max-workers": 5,
+    "min-workers": 5,
     "workers-per-cycle": 50,
     "cores": 12,
     "memory": cores * 8000,

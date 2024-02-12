@@ -1,2 +1,5 @@
 cache/*
 outputs/*
+__pycache__/*
+*.ipynb
+*.html

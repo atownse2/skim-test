@@ -119,16 +119,6 @@ def get_storage(dataset, storage_dir='vast'):
         os.makedirs(storage)
     return storage
 
-def get_skim_dir(batch=False):
-    skim_dir = output_dir
-    if batch:
-        skim_dir += "/batch"
-    
-    if not os.path.exists(skim_dir):
-        os.makedirs(skim_dir)
-
-    return skim_dir
-
 def get_filesets(datasets, test=False):
     filesets = {}
     for dataset in datasets:
@@ -140,7 +130,7 @@ def get_filesets(datasets, test=False):
         filesets[dataset]['files'] = {
             f"{data_dir}/{f}": {
                 'object_path': "Events",
-                } for f in files[:1 if test else None]}
+                } for f in files[:3 if test else None]}
         filesets[dataset]['metadata'] = {'year': get_year(dataset)}
 
     return filesets
@@ -150,17 +140,27 @@ def do_preprocessing(
     step_size,
     reprocess=False,
     test=False,
+    n_test_files=None,
+    n_test_steps=None,
     scheduler=None):
 
-    cache_dir = f"{top_dir}/cache/preprocessing"
-    if not os.path.exists(cache_dir):
-        os.makedirs(cache_dir)
+    if test: assert n_test_files is not None and n_test_steps is not None
+
+    def cache_path(dataset):
+        cache_dir = f"{top_dir}/cache/preprocessing"
+        if not os.path.exists(cache_dir):
+            os.makedirs(cache_dir)
+
+        if test:
+            fname = f"{dataset}_{step_size}_{n_test_files}files_{n_test_steps}steps.json"
+        else:
+            fname = f"{dataset}_{step_size}.json"
+        return f"{cache_dir}/{fname}"
 
     need_to_preprocess = []
     available_filesets = {}
     for dataset in datasets:
-        preprocessing_cache = f"{cache_dir}/{dataset}_{step_size}.json"
-        if test: preprocessing_cache = f"{cache_dir}/{dataset}_{step_size}_test.json"
+        preprocessing_cache = cache_path(dataset)
         if not os.path.exists(preprocessing_cache) or reprocess:
             need_to_preprocess.append(dataset)
         else:
@@ -179,10 +179,10 @@ def do_preprocessing(
         )
         for dataset_name, dataset_info in available_fileset.items():
             available_filesets[dataset_name] = dataset_info
-
-            preprocessing_cache = f"{cache_dir}/{dataset_name}_{step_size}.json"
-            if test: preprocessing_cache = f"{cache_dir}/{dataset_name}_{step_size}_test.json"
-            json.dump(available_fileset[dataset_name], open(preprocessing_cache, 'w'), indent=4, separators=(',', ':'))
+            json.dump(
+                available_fileset[dataset_name],
+                open(cache_path(dataset_name), 'w'),
+                indent=4, separators=(',', ':'))
 
     if test:
         print('Only processing one chunk of each dataset')
@@ -192,24 +192,24 @@ def do_preprocessing(
     from coffea.dataset_tools import filter_files
     return filter_files(available_filesets)
 
-def get_task_graph(filesets, cache_tag, recreate=False, test=False):
-    graph_cache = f"{top_dir}/cache/graphs/{cache_tag}.pkl"
-    if test: graph_cache = f"{top_dir}/cache/graphs/{cache_tag}_test.pkl"
-    if not os.path.exists(os.path.dirname(graph_cache)):
-        os.makedirs(os.path.dirname(graph_cache))
+# def get_task_graph(filesets, cache_tag, recreate=False, test=False):
+#     graph_cache = f"{top_dir}/cache/graphs/{cache_tag}.pkl"
+#     if test: graph_cache = f"{top_dir}/cache/graphs/{cache_tag}_test.pkl"
+#     if not os.path.exists(os.path.dirname(graph_cache)):
+#         os.makedirs(os.path.dirname(graph_cache))
     
-    if not os.path.exists(graph_cache) or recreate:
-        print('Task graph does not exist, creating it now')
-        graph = {dataset_name: skim_dataset(
-            dataset_name, dataset_info, test=test) for dataset_name, dataset_info in filesets.items()}
-        with open(graph_cache, 'wb') as f:
-            pickle.dump(graph, f)
+#     if not os.path.exists(graph_cache) or recreate:
+#         print('Task graph does not exist, creating it now')
+#         graph = {dataset_name: skim_dataset(
+#             dataset_name, dataset_info, test=test) for dataset_name, dataset_info in filesets.items()}
+#         with open(graph_cache, 'wb') as f:
+#             pickle.dump(graph, f)
 
-    else:
-        with open(graph_cache, 'rb') as f:
-            graph = pickle.load(f)
+#     else:
+#         with open(graph_cache, 'rb') as f:
+#             graph = pickle.load(f)
     
-    return graph
+#     return graph
 
 def skim_datasets(graph, scheduler=None):
     if scheduler is not None:
@@ -231,8 +231,6 @@ def skim_dataset(dataset_name, dataset_info, test=False):
     from coffea.nanoevents import NanoEventsFactory, NanoAODSchema
     from coffea.util import decompress_form
 
-    outdir = f"{get_skim_dir(batch=True)}/{dataset_name}"
-
     events = NanoEventsFactory.from_root(
         dataset_info['files'],
         schemaclass=NanoAODSchema,
@@ -249,53 +247,68 @@ def skim_dataset(dataset_name, dataset_info, test=False):
 
     events = events[pass_trigger&has_3_photons]
 
-    # Use the mask to create a new array without the 'HLT' or 'L1' fields
-    # to_keep = ['run', 'event', 'luminosityBlock', 'TrigObj', 'Jet', 'PV', 'MET', 'Photon']
-    # to_drop = ['HLT', 'L1', 'fixedGridRhoFastjetCentralChargedPileUp']
-    # to_drop = []
-    # to_keep = [field for field in events.fields if field not in to_drop]
-    # events = events[to_keep]
+    return events
+    # return events.to_parquet(outdir, compute=False)
 
-    return events.to_parquet(outdir, compute=False)
+def compute_and_write(delayed_obj, outpath):
+    ak.to_parquet(dask.compute(delayed_obj)[0], outpath)
 
-def merge_output(dataset):
-    import dask_awkward as ak
-
-    batchdir = f"{get_skim_dir(batch=True)}/{dataset}"
-    if not os.path.exists(batchdir):
-        print(f"Skims do not exist for {dataset}")
-        return
-
-    outfile = f"{get_skim_dir()}/{dataset}.parquet"
-    if os.path.exists(outfile):
-        os.remove(outfile)
-
-    outputs=None
-    for file in os.listdir(batchdir):
-        if outputs is None:
-            outputs = ak.from_parquet(f"{batchdir}/{file}")
-        else:
-            outputs = ak.concatenate([outputs, ak.from_parquet(f"{batchdir}/{file}")])
-
-    return ak.to_parquet(outputs, outfile, compute=False)
-
-def merge_outputs(datasets, scheduler=None):
-    print('Merging outputs')
-    to_compute = [merge_output(d) for d in datasets]
+def skim_and_write(filesets, outdir, scheduler=None):
+    to_compute = {}
+    for dataset_name, dataset_info in filesets.items():
+        events = skim_dataset(dataset_name, dataset_info)
+        outpath = f"{outdir}/{dataset_name}.parquet"
+        to_compute[dataset_name] = dask.delayed(compute_and_write)(events, outpath)
     
-    dask.compute(
-        to_compute,
-        scheduler=scheduler,
-        resources={"cores": 1},
-        resources_mode=None,
-        lazy_transfers=True
-    )
+    if scheduler is not None:
+        dask.compute(
+            to_compute,
+            scheduler=scheduler,
+            resources={"cores": 1},
+            resources_mode=None,
+            lazy_transfers=True)
+    else:
+        dask.compute(to_compute)
 
-    # Clean up batch directory
-    for dataset in datasets:
-        batchdir = f"{get_skim_dir(batch=True)}/{dataset}"
-        if os.path.exists(batchdir):
-            shutil.rmtree(batchdir)
+
+# def merge_output(dataset, outdir):
+#     import dask_awkward as ak
+
+#     batchdir = f"{get_skim_dir(batch=True)}/{dataset}"
+#     if not os.path.exists(batchdir):
+#         print(f"Skims do not exist for {dataset}")
+#         return
+
+#     outfile = f"{get_skim_dir()}/{dataset}.parquet"
+#     if os.path.exists(outfile):
+#         os.remove(outfile)
+
+#     outputs=None
+#     for file in os.listdir(batchdir):
+#         if outputs is None:
+#             outputs = ak.from_parquet(f"{batchdir}/{file}")
+#         else:
+#             outputs = ak.concatenate([outputs, ak.from_parquet(f"{batchdir}/{file}")])
+
+#     return ak.to_parquet(outputs, outfile, compute=False)
+
+# def merge_outputs(datasets, scheduler=None):
+#     print('Merging outputs')
+#     to_compute = [merge_output(d) for d in datasets]
+    
+#     dask.compute(
+#         to_compute,
+#         scheduler=scheduler,
+#         resources={"cores": 1},
+#         resources_mode=None,
+#         lazy_transfers=True
+#     )
+
+#     # Clean up batch directory
+#     for dataset in datasets:
+#         batchdir = f"{get_skim_dir(batch=True)}/{dataset}"
+#         if os.path.exists(batchdir):
+#             shutil.rmtree(batchdir)
 
 if __name__ == "__main__":
     import argparse
@@ -309,9 +322,15 @@ if __name__ == "__main__":
     parser.add_argument('--recreate_graph', action='store_true', help='recreate task graph')
     parser.add_argument('--batch', '-b', action='store_true', help='run in batch mode')
     parser.add_argument('--test', '-t', action='store_true', help='test mode')
+    parser.add_argument('--n_test_datasets', type=int, default=2, help='number of datasets to process in test mode')
+    parser.add_argument('--n_test_files', type=int, default=3, help='number of files to process in test mode')
+    parser.add_argument('--n_test_steps', type=int, default=2, help='number of chunks to process in test mode')
     args = parser.parse_args()
 
     t_start = time.time()
+
+    # outdir = "/afs/crc.nd.edu/user/a/atownse2/Public/skim-test/outputs"
+    outdir = "/project01/ndcms/atownse2/RSTriPhoton/skims"
 
     # all_datasets = [get_dataset_name(d) for d in all_datasets]
     if args.dataset_tag is not None:
@@ -326,6 +345,7 @@ if __name__ == "__main__":
         args.step_size = 50
         args.reprocess = True
         args.recreate_graph = True
+        datasets = datasets[:args.n_test_datasets]
 
     dataset_tag = None
     if args.dataset_tag is not None:
@@ -345,28 +365,32 @@ if __name__ == "__main__":
         datasets, args.step_size,
         reprocess=args.reprocess,
         test=args.test,
+        n_test_files=args.n_test_files,
+        n_test_steps=args.n_test_steps,
         scheduler=scheduler)
     print(f'Preprocessing executed in {(time.time()-t1)/60} minutes.')
 
     # Remove output directories if they already exist
     for dataset_name, dataset_info in filesets.items():
-        outdir = f"{get_skim_dir(batch=True)}/{dataset_name}"
-        if os.path.exists(outdir):
-            # Remove directory if it already exists
-            shutil.rmtree(outdir)
-        # Create directory
-        os.makedirs(outdir)
-
-    t1 = time.time()
-    print('Getting task graph')
-    cache_filetag = f"{dataset_tag}_{args.step_size}"
-    to_compute = get_task_graph(filesets, cache_filetag, recreate=args.recreate_graph, test=args.test)
-    print(f'Got task graph in {(time.time()-t1)/60} minutes.')
+        outfile = f"{outdir}/{dataset_name}.parquet"
+        if os.path.exists(outfile):
+            os.remove(outfile)
 
     t1 = time.time()
     print('Skimming datasets')
-    skim_datasets(to_compute, scheduler=scheduler)
+    skim_and_write(filesets, outdir, scheduler=scheduler)
     print(f'Skimming executed in {(time.time()-t1)/60} minutes.')
+
+    # t1 = time.time()
+    # print('Getting task graph')
+    # cache_filetag = f"{dataset_tag}_{args.step_size}"
+    # to_compute = get_task_graph(filesets, cache_filetag, recreate=args.recreate_graph, test=args.test)
+    # print(f'Got task graph in {(time.time()-t1)/60} minutes.')
+
+    # t1 = time.time()
+    # print('Skimming datasets')
+    # skim_datasets(to_compute, scheduler=scheduler)
+    # print(f'Skimming executed in {(time.time()-t1)/60} minutes.')
 
     # t1 = time.time()
     # print('Merging outputs')
