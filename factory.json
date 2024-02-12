@@ -1,0 +1,11 @@
+{
+    "manager-name": "triphoton-manager",
+    "max-workers": 50,
+    "min-workers": 50,
+    "workers-per-cycle": 50,
+    "cores": 12,
+    "memory": cores * 8000,
+    "disk": cores * 9000,
+    "timeout": 300,
+    "condor-requirements": "((has_vast))"
+}

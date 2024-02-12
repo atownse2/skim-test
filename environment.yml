@@ -1,0 +1,20 @@
+name: skim-test-env
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.6
+  - coffea
+  - fsspec-xrootd
+  - root
+  - numba
+  - dask
+  - dask-awkward
+  - dask-histogram
+  - dask-jobqueue
+  - distributed
+  - ndcctools
+  - dill
+  - pyarrow
+  - pyyaml
+  - ipywidgets
+  - ipython
