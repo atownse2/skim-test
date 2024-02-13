@@ -1,19 +1,15 @@
-import sys
 import os
-import shutil
 
-import cloudpickle as pickle
 import json
+# import cloudpickle as pickle
 
 import dask
 from ndcctools.taskvine import DaskVine
 
-import dask_awkward as dak
 import awkward as ak
+import dask_awkward as dak
 
 top_dir = os.path.dirname(os.path.abspath(__file__))
-output_dir = "/project01/ndcms/atownse2/RSTriPhoton/skims"
-# output_dir = "/afs/crc.nd.edu/user/a/atownse2/Public/skim-test/outputs"
 
 # Get filenames from DAS and copy them to local directory
 all_datasets = [
@@ -93,8 +89,6 @@ triggers= {"2016": ['DoublePhoton60'],
                "TriplePhoton_20_20_20_CaloIdLV2_R9IdVL"
                ]}
 
-def get_dataset_name(dataset):
-    return "_".join(dataset.split("/")[1:-1])
 
 def get_storage(dataset, storage_dir='vast'):
     dType = None
@@ -119,18 +113,18 @@ def get_storage(dataset, storage_dir='vast'):
         os.makedirs(storage)
     return storage
 
-def get_filesets(datasets, test=False):
+def get_filesets(datasets, test=False, n_test_files=None):
+
     filesets = {}
     for dataset in datasets:
-        if "/" in dataset:
-            dataset = get_dataset_name(dataset)
         filesets[dataset] = {}
         data_dir = get_storage(dataset)
         files = [f for f in os.listdir(data_dir) if dataset in f]
+        if test: files = files[:n_test_files]
         filesets[dataset]['files'] = {
             f"{data_dir}/{f}": {
                 'object_path': "Events",
-                } for f in files[:3 if test else None]}
+                } for f in files}
         filesets[dataset]['metadata'] = {'year': get_year(dataset)}
 
     return filesets
@@ -144,7 +138,12 @@ def do_preprocessing(
     n_test_steps=None,
     scheduler=None):
 
-    if test: assert n_test_files is not None and n_test_steps is not None
+    if test:
+        print(f"Running in test mode with step size {step_size}")
+        if n_test_files is not None:
+            print(f"Only processing {n_test_files} files for each dataset")
+        if n_test_steps is not None:
+            print(f"Only processing {n_test_steps} steps for each file")
 
     def cache_path(dataset):
         cache_dir = f"{top_dir}/cache/preprocessing"
@@ -152,23 +151,23 @@ def do_preprocessing(
             os.makedirs(cache_dir)
 
         if test:
-            fname = f"{dataset}_{step_size}_{n_test_files}files_{n_test_steps}steps.json"
+            fname = f"{dataset}_{step_size}_{n_test_files}files.json"
         else:
             fname = f"{dataset}_{step_size}.json"
         return f"{cache_dir}/{fname}"
 
     need_to_preprocess = []
-    available_filesets = {}
+    filesets = {}
     for dataset in datasets:
         preprocessing_cache = cache_path(dataset)
         if not os.path.exists(preprocessing_cache) or reprocess:
             need_to_preprocess.append(dataset)
         else:
-            available_filesets[dataset] = json.load(open(preprocessing_cache))
+            filesets[dataset] = json.load(open(preprocessing_cache))
 
     if need_to_preprocess:
         print(f'Preprocessing {len(need_to_preprocess)} datasets with chunk size {step_size}')
-        filesets = get_filesets(need_to_preprocess, test=test)
+        filesets = get_filesets(need_to_preprocess, test=test, n_test_files=n_test_files)
         from coffea.dataset_tools import preprocess
         available_fileset, _ = preprocess(
             filesets,
@@ -177,57 +176,21 @@ def do_preprocessing(
             save_form=True,
             scheduler=scheduler,
         )
-        for dataset_name, dataset_info in available_fileset.items():
-            available_filesets[dataset_name] = dataset_info
+        for dataset, info in available_fileset.items():
+            filesets[dataset] = info
             json.dump(
-                available_fileset[dataset_name],
-                open(cache_path(dataset_name), 'w'),
+                info,
+                open(cache_path(dataset), 'w'),
                 indent=4, separators=(',', ':'))
 
-    if test:
-        print('Only processing one chunk of each dataset')
+    if test and n_test_steps is not None:
         from coffea.dataset_tools import max_chunks
-        available_filesets = max_chunks(available_filesets, 1)
+        filesets = max_chunks(filesets, n_test_steps)
 
     from coffea.dataset_tools import filter_files
-    return filter_files(available_filesets)
+    return filter_files(filesets)
 
-# def get_task_graph(filesets, cache_tag, recreate=False, test=False):
-#     graph_cache = f"{top_dir}/cache/graphs/{cache_tag}.pkl"
-#     if test: graph_cache = f"{top_dir}/cache/graphs/{cache_tag}_test.pkl"
-#     if not os.path.exists(os.path.dirname(graph_cache)):
-#         os.makedirs(os.path.dirname(graph_cache))
-    
-#     if not os.path.exists(graph_cache) or recreate:
-#         print('Task graph does not exist, creating it now')
-#         graph = {dataset_name: skim_dataset(
-#             dataset_name, dataset_info, test=test) for dataset_name, dataset_info in filesets.items()}
-#         with open(graph_cache, 'wb') as f:
-#             pickle.dump(graph, f)
-
-#     else:
-#         with open(graph_cache, 'rb') as f:
-#             graph = pickle.load(f)
-    
-#     return graph
-
-def skim_datasets(graph, scheduler=None):
-    if scheduler is not None:
-        print("Submitting jobs")
-        outputs = dask.compute(
-            graph,
-            scheduler=scheduler,
-            resources={"cores": 1},
-            resources_mode=None,
-            lazy_transfers=True
-        )
-    else:
-        print("Running skims")
-        outputs = dask.compute(
-            graph,
-        )
-
-def skim_dataset(dataset_name, dataset_info, test=False):
+def skim_dataset(dataset, dataset_info, test=False):
     from coffea.nanoevents import NanoEventsFactory, NanoAODSchema
     from coffea.util import decompress_form
 
@@ -237,7 +200,7 @@ def skim_dataset(dataset_name, dataset_info, test=False):
         known_base_form=ak.forms.from_json(decompress_form(dataset_info['form']))
     ).events()
 
-    year = get_year(dataset_name)
+    year = get_year(dataset)
     pass_trigger = dak.zeros_like(events.run, dtype='bool')
     for trigger in triggers[year]:
         pass_trigger = pass_trigger | events.HLT[trigger]
@@ -248,153 +211,120 @@ def skim_dataset(dataset_name, dataset_info, test=False):
     events = events[pass_trigger&has_3_photons]
 
     return events
-    # return events.to_parquet(outdir, compute=False)
 
-def compute_and_write(delayed_obj, outpath):
-    ak.to_parquet(dask.compute(delayed_obj)[0], outpath)
+def compute_and_write(events, outpath):
+    ak.to_parquet(dask.compute(events)[0], outpath)
 
-def skim_and_write(filesets, outdir, scheduler=None):
-    to_compute = {}
-    for dataset_name, dataset_info in filesets.items():
-        events = skim_dataset(dataset_name, dataset_info)
-        outpath = f"{outdir}/{dataset_name}.parquet"
-        to_compute[dataset_name] = dask.delayed(compute_and_write)(events, outpath)
-    
+def create_graph(filesets, outdir):
+    graph = {}
+    for dataset, info in filesets.items():
+        events = skim_dataset(dataset, info)
+        outpath = f"{outdir}/{dataset}.parquet"
+        graph[dataset] = dask.delayed(compute_and_write)(events, outpath)
+
+    return graph
+
+def compute_graph(graph, scheduler=None):
     if scheduler is not None:
         dask.compute(
-            to_compute,
+            graph,
             scheduler=scheduler,
             resources={"cores": 1},
             resources_mode=None,
             lazy_transfers=True)
     else:
-        dask.compute(to_compute)
-
-
-# def merge_output(dataset, outdir):
-#     import dask_awkward as ak
-
-#     batchdir = f"{get_skim_dir(batch=True)}/{dataset}"
-#     if not os.path.exists(batchdir):
-#         print(f"Skims do not exist for {dataset}")
-#         return
-
-#     outfile = f"{get_skim_dir()}/{dataset}.parquet"
-#     if os.path.exists(outfile):
-#         os.remove(outfile)
-
-#     outputs=None
-#     for file in os.listdir(batchdir):
-#         if outputs is None:
-#             outputs = ak.from_parquet(f"{batchdir}/{file}")
-#         else:
-#             outputs = ak.concatenate([outputs, ak.from_parquet(f"{batchdir}/{file}")])
-
-#     return ak.to_parquet(outputs, outfile, compute=False)
-
-# def merge_outputs(datasets, scheduler=None):
-#     print('Merging outputs')
-#     to_compute = [merge_output(d) for d in datasets]
-    
-#     dask.compute(
-#         to_compute,
-#         scheduler=scheduler,
-#         resources={"cores": 1},
-#         resources_mode=None,
-#         lazy_transfers=True
-#     )
-
-#     # Clean up batch directory
-#     for dataset in datasets:
-#         batchdir = f"{get_skim_dir(batch=True)}/{dataset}"
-#         if os.path.exists(batchdir):
-#             shutil.rmtree(batchdir)
+        dask.compute(graph)
 
 if __name__ == "__main__":
     import argparse
     import time
+
+    t_start = time.time()
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset_tag', '-d', type=str, default=None, help='dataset tag')
     parser.add_argument('--do_all', '-a', action='store_true', help='process all datasets')
-    parser.add_argument('--step_size', '-s', type=int, default=50000, help='Split input files into chunks of this number of events for processing')
+    parser.add_argument('--step_size', '-s', type=int, default=250000, help='Split input files into chunks of this number of events for processing')
     parser.add_argument('--reprocess', '-r', action='store_true', help='reprocess datasets')
     parser.add_argument('--recreate_graph', action='store_true', help='recreate task graph')
-    parser.add_argument('--batch', '-b', action='store_true', help='run in batch mode')
+    parser.add_argument('--outdir', '-o', type=str, default="/project01/ndcms/atownse2/RSTriPhoton/skims", help='output directory')
+    parser.add_argument('--use_dask_vine', '-dv', action='store_true', help='use DaskVine')
     parser.add_argument('--test', '-t', action='store_true', help='test mode')
-    parser.add_argument('--n_test_datasets', type=int, default=2, help='number of datasets to process in test mode')
-    parser.add_argument('--n_test_files', type=int, default=3, help='number of files to process in test mode')
-    parser.add_argument('--n_test_steps', type=int, default=2, help='number of chunks to process in test mode')
+    parser.add_argument('--test_step_size', type=int, default=50, help='chunk size for test mode')
+    parser.add_argument('--n_test_datasets', type=int, default=2, help='number of datasets to process in test mode (-1=all)')
+    parser.add_argument('--n_test_files', type=int, default=3, help='number of files to process in test mode (-1=all)')
+    parser.add_argument('--n_test_steps', type=int, default=2, help='number of chunks to process in test mode (-1=all)')
     args = parser.parse_args()
 
-    t_start = time.time()
+    dataset_tag = args.dataset_tag
+    do_all = args.do_all
+    step_size = args.step_size
+    reprocess = args.reprocess
+    recreate_graph = args.recreate_graph
+    outdir = args.outdir
+    use_dask_vine = args.use_dask_vine
 
-    # outdir = "/afs/crc.nd.edu/user/a/atownse2/Public/skim-test/outputs"
-    outdir = "/project01/ndcms/atownse2/RSTriPhoton/skims"
+    test = args.test
+    n_test_datasets = None
+    n_test_files = None
+    n_test_steps = None
 
-    # all_datasets = [get_dataset_name(d) for d in all_datasets]
-    if args.dataset_tag is not None:
-        datasets = [get_dataset_name(d) for d in all_datasets if args.dataset_tag in d]
-    elif args.do_all:
-        datasets = [get_dataset_name(d) for d in all_datasets]
-    else:
-        raise ValueError("Must specify dataset tag or use --do_all")
+    if test:
+        outdir += "/test"
+        step_size = args.test_step_size
+        n_test_datasets = args.n_test_datasets if args.n_test_datasets>0 else None
+        n_test_files = args.n_test_files if args.n_test_files>0 else None
+        n_test_steps = args.n_test_steps if args.n_test_steps>0 else None
 
-    if args.test:
-        print('Running in test mode')
-        args.step_size = 50
-        args.reprocess = True
-        args.recreate_graph = True
-        datasets = datasets[:args.n_test_datasets]
-
-    dataset_tag = None
-    if args.dataset_tag is not None:
-        dataset_tag = args.dataset_tag
-    elif args.do_all:
-        dataset_tag = "all"
-
-    if args.batch:
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+    
+    scheduler = None
+    if use_dask_vine:
         print('Executing with DaskVine')
         m = DaskVine(9125, name="triphoton-manager", run_info_path="/project01/ndcms/atownse2/RSTriPhoton/vine-run-info")
         scheduler = m.get
-    else:
-        scheduler = None
 
+    # Get datasets
+    assert not (dataset_tag is not None and do_all), "Cannot specify dataset tag and use --do_all"
+    dataset_name = lambda d: "_".join(d.split("/")[1:-1])
+    if dataset_tag is not None:
+        datasets = [dataset_name(d) for d in all_datasets if dataset_tag in d]
+    elif do_all:
+        dataset_tag = "all"
+        datasets = [dataset_name(d) for d in all_datasets]
+    else:
+        raise ValueError("Must specify dataset tag or use --do_all")
+
+    if test:
+        datasets = datasets[:n_test_datasets]
+
+    # Remove output files if they already exist
+    for dataset in datasets:
+        outfile = f"{outdir}/{dataset}.parquet"
+        if os.path.exists(outfile): os.remove(outfile)
+
+    # Get filesets
     t1 = time.time()
     filesets = do_preprocessing(
-        datasets, args.step_size,
-        reprocess=args.reprocess,
-        test=args.test,
-        n_test_files=args.n_test_files,
-        n_test_steps=args.n_test_steps,
-        scheduler=scheduler)
+        datasets, step_size,
+        reprocess=reprocess,
+        scheduler=scheduler,
+        test=test,
+        n_test_files=n_test_files,
+        n_test_steps=n_test_steps)
     print(f'Preprocessing executed in {(time.time()-t1)/60} minutes.')
 
-    # Remove output directories if they already exist
-    for dataset_name, dataset_info in filesets.items():
-        outfile = f"{outdir}/{dataset_name}.parquet"
-        if os.path.exists(outfile):
-            os.remove(outfile)
-
+    # Create task graph
     t1 = time.time()
-    print('Skimming datasets')
-    skim_and_write(filesets, outdir, scheduler=scheduler)
-    print(f'Skimming executed in {(time.time()-t1)/60} minutes.')
+    print('Creating task graph')
+    graph = create_graph(filesets, outdir)
+    print(f'Task graph created in {(time.time()-t1)/60} minutes.')
 
-    # t1 = time.time()
-    # print('Getting task graph')
-    # cache_filetag = f"{dataset_tag}_{args.step_size}"
-    # to_compute = get_task_graph(filesets, cache_filetag, recreate=args.recreate_graph, test=args.test)
-    # print(f'Got task graph in {(time.time()-t1)/60} minutes.')
-
-    # t1 = time.time()
-    # print('Skimming datasets')
-    # skim_datasets(to_compute, scheduler=scheduler)
-    # print(f'Skimming executed in {(time.time()-t1)/60} minutes.')
-
-    # t1 = time.time()
-    # print('Merging outputs')
-    # merge_outputs(datasets, scheduler=scheduler)
-    # print(f'Merging outputs executed in {(time.time()-t1)/60} minutes.')
+    # Compute and write outputs
+    t1 = time.time()
+    print('Computing and writing outputs')
+    compute_graph(graph, scheduler=scheduler)
+    print(f'Outputs computed and written in {(time.time()-t1)/60} minutes.')
 
     print(f'Skimming {dataset_tag} datasets executed in {(time.time()-t_start)/60} minutes.')
