@@ -89,36 +89,27 @@ triggers= {"2016": ['DoublePhoton60'],
                "TriplePhoton_20_20_20_CaloIdLV2_R9IdVL"
                ]}
 
+vast_base = "/project01/ndcms/atownse2/RSTriPhoton"
 
-def get_storage(dataset, storage_dir='vast'):
-    dType = None
-    if "EGamma" in dataset or "DoubleEG" in dataset:
-        dType = "data"
-    elif "GJets" in dataset:
-        dType = "GJets"
+def dataset_dir(dataset, base_dir, data_format):
+
+    if any(tag in dataset for tag in data_tags):
+        tag = "data"
     else:
-        raise ValueError("Dataset {} not recognized".format(dataset))
+        tag = "mc"
     
-    if storage_dir == 'vast':
-        pre = '/project01/ndcms'
-    elif storage_dir == 'hadoop':
-        raise NotImplementedError("Hadoop storage not implemented, need to copy files over")
-        pre = 'root://ndcms.crc.nd.edu//store/user'
-    else:
-        raise ValueError(f"Storage directory {storage_dir} not recognized")
+    outdir = f"{base_dir}/{tag}/{data_format}"
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+    
+    return outdir
 
-    storage = f'{pre}/atownse2/RSTriPhoton/{dType}/NanoAODv9'
-
-    if not os.path.exists(storage):
-        os.makedirs(storage)
-    return storage
-
-def get_filesets(datasets, test=False, n_test_files=None):
+def get_filesets(datasets, base_dir, data_format, test=False, n_test_files=None):
 
     filesets = {}
     for dataset in datasets:
         filesets[dataset] = {}
-        data_dir = get_storage(dataset)
+        data_dir = dataset_dir(dataset, base_dir, data_format)
         files = [f for f in os.listdir(data_dir) if dataset in f]
         if test: files = files[:n_test_files]
         filesets[dataset]['files'] = {
@@ -132,6 +123,8 @@ def get_filesets(datasets, test=False, n_test_files=None):
 def do_preprocessing(
     datasets,
     step_size,
+    input_base_dir=vast_base,
+    input_format="NanoAODv9",
     reprocess=False,
     test=False,
     n_test_files=None,
@@ -167,7 +160,7 @@ def do_preprocessing(
 
     if need_to_preprocess:
         print(f'Preprocessing {len(need_to_preprocess)} datasets with chunk size {step_size}')
-        filesets = get_filesets(need_to_preprocess, test=test, n_test_files=n_test_files)
+        filesets = get_filesets(need_to_preprocess, input_base_dir, input_format, test=test, n_test_files=n_test_files)
         from coffea.dataset_tools import preprocess
         available_fileset, _ = preprocess(
             filesets,
@@ -208,21 +201,33 @@ def skim_dataset(dataset, dataset_info, test=False):
     good_photons = (events.Photon.cutBased >= 1) & (events.Photon.pt > 20)
     has_3_photons = dak.num(events.Photon[good_photons]) >= 3
 
-    events = events[pass_trigger&has_3_photons]
-
-    return events
+    return events[pass_trigger&has_3_photons]
 
 def compute_and_write(events, outpath):
     ak.to_parquet(dask.compute(events)[0], outpath)
 
-def create_graph(filesets, outdir):
+def create_graph(filesets, output_base_dir=vast_base):
     graph = {}
     for dataset, info in filesets.items():
         events = skim_dataset(dataset, info)
-        outpath = f"{outdir}/{dataset}.parquet"
+        outpath = f"{dataset_dir(dataset, output_base_dir, 'skim')}/{dataset}.parquet"
         graph[dataset] = dask.delayed(compute_and_write)(events, outpath)
 
     return graph
+
+def optimize_graph(graph):
+    """A graph here is a dictionary of delayed object"""
+    from dask.optimization import cull, fuse, inline
+    from dask.delayed import Delayed
+    new_graph = {}
+    for key, delayed_obj in graph.items():
+        dsk, _ = cull(delayed_obj.dask, delayed_obj.__dask_keys__())
+        dsk, _ = fuse(dsk, ave_width=4)
+        dsk = inline(dsk, delayed_obj.__dask_keys__())
+        dsk, _ = cull(dsk, delayed_obj.__dask_keys__())
+        new_graph[key] = Delayed(delayed_obj.__dask_keys__(), dsk)
+    
+    return new_graph
 
 def compute_graph(graph, scheduler=None):
     if scheduler is not None:
@@ -247,7 +252,8 @@ if __name__ == "__main__":
     parser.add_argument('--step_size', '-s', type=int, default=250000, help='Split input files into chunks of this number of events for processing')
     parser.add_argument('--reprocess', '-r', action='store_true', help='reprocess datasets')
     parser.add_argument('--recreate_graph', action='store_true', help='recreate task graph')
-    parser.add_argument('--outdir', '-o', type=str, default="/project01/ndcms/atownse2/RSTriPhoton/skims", help='output directory')
+    parser.add_argument('--optimize', action='store_true', help='optimize task graph')
+    parser.add_argument('--outdir_base', '-o', type=str, default="/project01/ndcms/atownse2/RSTriPhoton/", help='output directory')
     parser.add_argument('--use_dask_vine', '-dv', action='store_true', help='use DaskVine')
     parser.add_argument('--test', '-t', action='store_true', help='test mode')
     parser.add_argument('--test_step_size', type=int, default=50, help='chunk size for test mode')
@@ -261,7 +267,8 @@ if __name__ == "__main__":
     step_size = args.step_size
     reprocess = args.reprocess
     recreate_graph = args.recreate_graph
-    outdir = args.outdir
+    optimize = args.optimize
+    outdir_base = args.outdir_base
     use_dask_vine = args.use_dask_vine
 
     test = args.test
@@ -270,14 +277,14 @@ if __name__ == "__main__":
     n_test_steps = None
 
     if test:
-        outdir += "/test"
+        outdir_base = f"{outdir_base}/test"
         step_size = args.test_step_size
         n_test_datasets = args.n_test_datasets if args.n_test_datasets>0 else None
         n_test_files = args.n_test_files if args.n_test_files>0 else None
         n_test_steps = args.n_test_steps if args.n_test_steps>0 else None
 
-    if not os.path.exists(outdir):
-        os.makedirs(outdir)
+    if not os.path.exists(outdir_base):
+        os.makedirs(outdir_base)
     
     scheduler = None
     if use_dask_vine:
@@ -299,8 +306,9 @@ if __name__ == "__main__":
     if test:
         datasets = datasets[:n_test_datasets]
 
-    # Remove output files if they already exist
+    # Create output directories and remove files if they exist
     for dataset in datasets:
+        outdir = dataset_dir(dataset, outdir_base, "skim")
         outfile = f"{outdir}/{dataset}.parquet"
         if os.path.exists(outfile): os.remove(outfile)
 
@@ -318,8 +326,11 @@ if __name__ == "__main__":
     # Create task graph
     t1 = time.time()
     print('Creating task graph')
-    graph = create_graph(filesets, outdir)
+    graph = create_graph(filesets, outdir_base)
     print(f'Task graph created in {(time.time()-t1)/60} minutes.')
+
+    if optimize:
+        graph = optimize_graph(graph)
 
     # Compute and write outputs
     t1 = time.time()

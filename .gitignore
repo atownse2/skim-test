@@ -1,6 +1,9 @@
 cache/*
 outputs/*
+plots/*
+test/*
 __pycache__/*
 *.ipynb
 *.html
 *.tar.gz
+vine_plot_compose.py

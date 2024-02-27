@@ -2,9 +2,6 @@ To create the environment you can do:
 
 ```bash
 conda create -f environment.yml
-conda activate skim-test-env
-conda remove coffea
-pip install git+https://github.com/CoffeaTeam/coffea.git@use_merge_union_of_records
 ```
 
 To do a test run do:
@@ -32,4 +29,20 @@ Start the factory with:
 
 ```bash
 vine_factory -T condor -C factory.json --python-env skim-test-env.tar.gz
+```
+
+To run interactively with one worker do:
+```bash
+vine_worker -d all --cores 4 --memory 36000 -M triphoton-manager
+```
+This will output the logs to the `/tmp` directory of the machine the worker is running on.
+
+To make the main plots do:
+```bash
+vine_graph_log <PERFORMANCE_LOG_PATH>
+```
+
+To make the disk accumulation plots do:
+```bash
+python vine_plot_compose.py <TRANSACTION_LOGP_PATH> --worker-cache --sublabels --out <OUTPUT_FILENAME>
 ```
