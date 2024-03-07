@@ -1,5 +1,5 @@
 {
-    "manager-name": "triphoton-manager",
+    "manager-name": "skim-test-manager",
     "max-workers": 50,
     "min-workers": 50,
     "workers-per-cycle": 50,

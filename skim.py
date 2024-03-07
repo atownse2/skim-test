@@ -104,6 +104,9 @@ def dataset_dir(dataset, base_dir, data_format):
     
     return outdir
 
+def get_dataset_name(das_dataset):
+    return "_".join(das_dataset.split("/")[1:-1])
+
 def get_filesets(datasets, base_dir, data_format, test=False, n_test_files=None):
 
     filesets = {}
@@ -143,11 +146,10 @@ def do_preprocessing(
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
 
-        if test:
-            fname = f"{dataset}_{step_size}_{n_test_files}files.json"
-        else:
-            fname = f"{dataset}_{step_size}.json"
-        return f"{cache_dir}/{fname}"
+        ftag = f"{dataset}_{step_size}"
+        if test and n_test_files is not None:
+            ftag += f"{n_test_files}files"
+        return f"{cache_dir}/{ftag}.json"
 
     need_to_preprocess = []
     filesets = {}
@@ -183,7 +185,7 @@ def do_preprocessing(
     from coffea.dataset_tools import filter_files
     return filter_files(filesets)
 
-def skim_dataset(dataset, dataset_info, test=False):
+def skim_dataset(dataset, dataset_info):
     from coffea.nanoevents import NanoEventsFactory, NanoAODSchema
     from coffea.util import decompress_form
 
@@ -198,9 +200,10 @@ def skim_dataset(dataset, dataset_info, test=False):
     for trigger in triggers[year]:
         pass_trigger = pass_trigger | events.HLT[trigger]
 
-    good_photons = (events.Photon.cutBased >= 1) & (events.Photon.pt > 20)
+    good_photons = (events.Photon.cutBased >= 1) #& (events.Photon.pt > 20)
+    # good_photons = (events.Photon.pt > 20)
     has_3_photons = dak.num(events.Photon[good_photons]) >= 3
-
+    
     return events[pass_trigger&has_3_photons]
 
 def compute_and_write(events, outpath):
@@ -289,17 +292,17 @@ if __name__ == "__main__":
     scheduler = None
     if use_dask_vine:
         print('Executing with DaskVine')
-        m = DaskVine(9125, name="triphoton-manager", run_info_path="/project01/ndcms/atownse2/RSTriPhoton/vine-run-info")
+        m = DaskVine(9124, name="skim-test-manager", run_info_path="/project01/ndcms/atownse2/RSTriPhoton/vine-run-info")
         scheduler = m.get
 
     # Get datasets
     assert not (dataset_tag is not None and do_all), "Cannot specify dataset tag and use --do_all"
-    dataset_name = lambda d: "_".join(d.split("/")[1:-1])
+
     if dataset_tag is not None:
-        datasets = [dataset_name(d) for d in all_datasets if dataset_tag in d]
+        datasets = [get_dataset_name(d) for d in all_datasets if dataset_tag in d]
     elif do_all:
         dataset_tag = "all"
-        datasets = [dataset_name(d) for d in all_datasets]
+        datasets = [get_dataset_name(d) for d in all_datasets]
     else:
         raise ValueError("Must specify dataset tag or use --do_all")
 

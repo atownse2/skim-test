@@ -28,7 +28,7 @@ poncho_package_create $CONDA_PREFIX skim-test-env.tar.gz
 Start the factory with:
 
 ```bash
-vine_factory -T condor -C factory.json --python-env skim-test-env.tar.gz
+vine_factory -T condor -C factory.json --python-env skim-test-env.tar.gz --scratch-dir=/tmp/vine-factory-$uid
 ```
 
 To run interactively with one worker do:
@@ -39,7 +39,7 @@ This will output the logs to the `/tmp` directory of the machine the worker is r
 
 To make the main plots do:
 ```bash
-vine_graph_log <PERFORMANCE_LOG_PATH>
+vine_graph_log -T png <PERFORMANCE_LOG_PATH>
 ```
 
 To make the disk accumulation plots do:
